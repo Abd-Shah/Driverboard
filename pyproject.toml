@@ -28,10 +28,6 @@ dev = [
 [project.scripts]
 leaderboard-audit = "tools.audit.cli:main"
 leaderboard-iterate = "tools.iteration.cli:main"
-leaderboard-phase1-demo = "tools.phase1_demo:main"
-leaderboard-phase2-demo = "tools.phase2_demo:main"
-leaderboard-phase3-demo = "tools.phase3_demo:main"
-leaderboard-phase4-demo = "tools.phase4_demo:main"
 leaderboard-phase5-demo = "tools.phase5_demo:main"
 
 [tool.hatch.build.targets.wheel]

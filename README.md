@@ -238,8 +238,9 @@ claims.
 | Forced 100-event worker recovery | 500.303 ms |
 | Corrupted 5,100-trip city rebuild | 0.284 seconds |
 
-Selected evidence is stored in `reports/`. The complete development narrative and
-limitations are documented in `PHASE1.md` through `PHASE5.md`.
+Selected benchmark and recovery evidence is stored in `reports/`. The current system
+design is documented in `architecture.md`, while `decisions.md` records why each major
+architectural change was made.
 
 ## Repository guide
 
