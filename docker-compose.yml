@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: leaderboard
+      POSTGRES_USER: leaderboard
+      POSTGRES_PASSWORD: leaderboard
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leaderboard -d leaderboard"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    volumes:
+      - leaderboard-postgres:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    volumes:
+      - leaderboard-redis:/data
+
+  worker:
+    build: .
+    command: ["python", "-m", "tools.worker.cli", "--loop", "--batch-size", "100"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://leaderboard:leaderboard@db:5432/leaderboard
+      CACHE_ENABLED: "true"
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles: ["worker"]
+
+volumes:
+  leaderboard-postgres:
+  leaderboard-redis:
