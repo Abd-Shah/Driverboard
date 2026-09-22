@@ -1,126 +1,264 @@
-# Driver Review Leaderboard
+# Driverboard
 
-An incremental backend project for correct, auditable driver ratings and deterministic
-city leaderboards. PostgreSQL review records are authoritative; scores and rankings are
-derived and rebuildable.
+Driverboard is an auditable backend for collecting driver ratings and publishing
+deterministic top-100 leaderboards for each city. It supports rating corrections,
+deletion and moderation, rolling 90-day scores, retry-safe background processing,
+versioned leaderboard snapshots, Redis caching, and complete reconstruction from durable
+review history.
 
-## Current state: Phase 5 complete (Iteration 020)
+The project was developed in five measured phases: correctness, database optimization,
+asynchronous processing, Redis caching, and failure/recovery validation.
 
-The service supports idempotent review changes and deletion, moderation exclusion and
-restoration, rolling 90-day scores, and immutable versioned top-100 city leaderboards.
-Scores and rankings refresh only when contribution state actually changes.
+## What it does
+
+- Accepts one current 1–5 rating for each eligible completed trip.
+- Preserves immutable review versions when a rider corrects a rating.
+- Uses idempotency keys so retries cannot apply the same change twice.
+- Excludes deleted, moderated, and older-than-90-day reviews from driver scores.
+- Requires 20 contributing reviews before a driver becomes leaderboard-eligible.
+- Publishes immutable top-100 city generations ordered by average, review count, and
+  stable driver ID.
+- Processes score and ranking changes through a durable PostgreSQL transactional outbox.
+- Serves leaderboard snapshots from Redis with automatic PostgreSQL fallback.
+- Rebuilds and compares derived scores from authoritative reviews before publication.
+- Independently audits database and cache consistency.
+
+## Architecture
+
+```text
+Rider / Operator
+       |
+       v
+    FastAPI
+       |
+       +---- authoritative mutation + outbox event ----> PostgreSQL
+       |                                                    |
+       |                                                    v
+       |                                             background worker
+       |                                                    |
+       |                                      scores + versioned generation
+       |                                                    |
+       +---- leaderboard read ----> Redis <-----------------+
+                  |                cache
+                  +---- miss/error ----> PostgreSQL fallback
+
+Audit tool ----> independently reconstructs expected state from PostgreSQL
+```
+
+PostgreSQL is the source of truth. Driver scores, leaderboard generations, and Redis
+entries are derived data and can be reconstructed from trips, review versions, deletion
+state, and moderation history.
+
+## Technology
+
+- Python 3.11 and FastAPI
+- PostgreSQL 16, SQLAlchemy, and Alembic
+- Redis 7
+- Docker Compose
+- Pytest and Ruff
+
+## Quick start
+
+### 1. Create the environment
 
 ```bash
 cp .env.example .env
-docker compose up -d db redis
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
+```
+
+### 2. Start PostgreSQL and Redis
+
+```bash
+docker compose up -d db redis
+docker compose ps
+```
+
+Both containers should report `healthy`.
+
+### 3. Apply migrations
+
+```bash
 alembic upgrade head
-uvicorn driver_leaderboard.main:app --reload
+alembic current
 ```
 
-Run the independent audit or a complete deterministic experiment:
+The current schema is `0009 (head)`.
+
+### 4. Generate a demonstration dataset
+
+This command resets development data, creates three cities and 60 drivers, exercises
+review correction, deletion, moderation, worker retry, expiration, and rebuild flows, and
+then runs the independent database audit.
 
 ```bash
-python -m tools.audit.cli
-python -m tools.iteration.cli \
-  --name iteration-014 \
-  --cities 10 \
-  --drivers 500 \
-  --reviews 15000 \
-  --unrated-trips 500
+CACHE_ENABLED=true python -m tools.iteration.cli \
+  --name local-demo \
+  --cities 3 \
+  --drivers 60 \
+  --reviews 1800 \
+  --unrated-trips 60
 ```
 
-The iteration command resets development data, seeds a deterministic dataset, runs the
-review submission/correction workload, audits the result, and writes JSON and Markdown
-reports under `reports/`.
+The command should finish with `audit=PASS`.
 
-Review commands use `PUT /trips/{trip_id}/review` with `Idempotency-Key` and
-`X-Rider-ID` headers. The current accepted version is available from
-`GET /trips/{trip_id}/review`.
-
-Delete a rider review with `DELETE /trips/{trip_id}/review` using `Idempotency-Key` and
-`X-Rider-ID`. Exclude or restore a review with
-`POST /reviews/{review_id}/moderation-decisions` using `Idempotency-Key` and
-`X-Moderator-ID`. The moderator header represents an identity already authenticated by a
-trusted gateway; production authentication is outside the current project scope.
-
-Operators can build an isolated candidate with `POST /admin/rebuilds`, inspect it with
-`GET /admin/rebuilds/{id}`, then explicitly publish or discard it. Candidate scores and
-rankings never replace live state until publication, and publication rejects candidates
-whose base generation has become stale.
-
-Advance a city's rolling window with `POST /admin/expiration-runs` or:
+Warm and verify Redis:
 
 ```bash
-python -m tools.expiration.cli --city-id <city-uuid>
+CACHE_ENABLED=true python -m tools.cache.cli
+CACHE_ENABLED=true python -m tools.cache.audit
 ```
 
-Expiration runs are durable and idempotent for a `(city, effective_at)` pair. They
-recalculate city scores and publish only when at least one driver's aggregate changes.
+The cache audit should report `"passed": true`.
 
-Run the read-only completion demonstration with `python -m tools.phase1_demo`. See
-`PHASE1.md` for the full verification and demonstration workflow.
-
-Iteration 009 extends the same system across multiple cities. Use `--cities` with the
-iteration runner; drivers, trips, rebuilds, expirations, scores, and published generations
-remain city-isolated.
-
-Iteration 010 adds PostgreSQL query-plan and latency tooling plus measured indexes. Run
-`python -m tools.benchmark.postgres`; the retained trip index reduced the authoritative
-score-query execution time by 67.5% in the recorded five-city dataset.
-
-The final Phase 2 workload covers 10 cities, 500 drivers, and 15,500 trips. Its concurrent
-local benchmark sustained 1,077.7 leaderboard reads/second and 131.6 review
-corrections/second with 18.328 ms and 110.603 ms p95 latency respectively. See
-`PHASE2.md` for environment, caveats, commands, and all Phase 2 reports.
-
-Iteration 012 introduces a PostgreSQL transactional outbox. Review commands now commit
-authoritative state and a durable event, while `python -m tools.worker.cli --drain`
-recalculates scores and publishes batched city generations in the background.
-
-Iteration 013 adds exponential retry handling, an injected-failure recovery exercise,
-two-worker `SKIP LOCKED` integration coverage, and `/admin/outbox/metrics` for pending,
-processing, completed, failed, and oldest-event-age visibility.
-
-Iteration 014 completes Phase 3 with the same 10-city, 500-driver, 15,500-trip workload
-used for the Phase 2 baseline. Asynchronous review acceptance measured 29.474 ms p95 and
-490.1 writes/second, a 73.4% p95 improvement and 272.4% throughput improvement over the
-local Phase 2 run. The worker drained 49 benchmark events and published ten city
-generations in 157.998 ms. See `PHASE3.md` for commands, caveats, and report locations.
-
-Phase 4 adds a Redis read-through leaderboard cache without changing the source-of-truth
-boundary. Workers refresh affected city keys after durable publication; misses and Redis
-outages fall back to PostgreSQL. The 100-city, 10,000-driver, 500,000-review completion
-run passed all 34 database audits and all 100 cached generations matched PostgreSQL.
-At that dataset, Redis reduced measured read p95 from 28.338 ms to 4.691 ms and increased
-throughput from 940.2 to 8,483.7 reads/second. See `PHASE4.md`.
-
-Phase 5 validates the completed architecture under mixed traffic and controlled failures.
-A 21,000-operation run sustained 3,131.4 combined operations/second while a live worker
-drained a 751-event peak backlog to zero. Redis outage fallback served every request,
-a forced 100-event worker failure recovered in 500.303 ms, and a deliberately corrupted
-5,100-trip city rebuilt and published in 0.284 seconds against the 30-minute target. See
-`PHASE5.md` for the final evidence and limitations.
-
-Read a derived score from `GET /cities/{city_id}/drivers/{driver_id}/score`. Rebuild all
-scores for one city with:
+### 5. Start the API
 
 ```bash
-python -m tools.rebuild.scores --city-id <city-uuid>
+CACHE_ENABLED=true uvicorn driver_leaderboard.main:app --reload --port 8001
 ```
 
-Fetch the currently published generation from `GET /cities/{city_id}/leaderboard`.
-Build and atomically publish a new generation with:
+Open [http://127.0.0.1:8001/docs](http://127.0.0.1:8001/docs) to use the Swagger UI.
+Port 8001 is used here to avoid conflicts with services commonly bound to port 8000.
+
+## Try the API
+
+Start with:
+
+```text
+GET /health
+GET /admin/outbox/metrics
+GET /admin/cache/metrics
+```
+
+Get a city ID from PostgreSQL:
 
 ```bash
-python -m tools.rebuild.leaderboard --city-id <city-uuid>
+docker compose exec db psql -U leaderboard -d leaderboard \
+  -c "SELECT id, name FROM cities ORDER BY name;"
 ```
 
-## Development checks
+Use a returned UUID with:
+
+```text
+GET /cities/{city_id}/leaderboard
+```
+
+The response includes the generation ID and version, publication and source-score
+timestamps, rank, stable driver ID, average rating, and contributing-review count.
+
+### Submit or correct a rating
+
+Find a trip and its rider:
+
+```bash
+docker compose exec db psql -U leaderboard -d leaderboard -c "
+SELECT t.id AS trip_id, t.rider_id, rv.rating
+FROM trips t
+JOIN reviews r ON r.trip_id = t.id
+JOIN review_versions rv ON rv.review_id = r.id AND rv.is_current
+ORDER BY t.stable_id
+LIMIT 1;
+"
+```
+
+In Swagger, execute `PUT /trips/{trip_id}/review` with:
+
+```text
+Idempotency-Key: any unique value
+X-Rider-ID: the trip's rider UUID
+```
+
+```json
+{
+  "rating": 5
+}
+```
+
+The request durably accepts the new review version and creates an outbox event. Process
+pending derived work with:
+
+```bash
+CACHE_ENABLED=true python -m tools.worker.cli --drain
+```
+
+The worker recalculates the affected driver, publishes a new city generation, refreshes
+Redis, and marks the event complete.
+
+## Testing and auditing
+
+Run the fast test suite and linter:
 
 ```bash
 pytest
 ruff check .
 ```
+
+After generating a dataset, run the real PostgreSQL concurrency tests:
+
+```bash
+RUN_POSTGRES_TESTS=1 pytest
+```
+
+Run the independent database and cache audits:
+
+```bash
+python -m tools.audit.cli
+CACHE_ENABLED=true python -m tools.cache.audit
+```
+
+Tests verify known scenarios such as corrections, retries, and concurrent workers. The
+database audit separately evaluates 34 whole-system invariants, including review-version
+integrity, exact score reconstruction, deterministic ranking, moderation state, rebuild
+state, expiration, and outbox processing. The cache audit compares every Redis generation
+ID with the currently published PostgreSQL generation.
+
+For a compact final-state summary, run:
+
+```bash
+CACHE_ENABLED=true python -m tools.phase5_demo
+```
+
+## Measured results
+
+The final local dataset contained 100 cities, 10,000 drivers, and 500,000+ synthetic
+reviews. These are reproducible local-machine measurements, not production capacity
+claims.
+
+| Measurement | Result |
+| --- | ---: |
+| Redis leaderboard throughput | 8,483.7 reads/second |
+| Redis leaderboard latency | 4.691 ms p95 |
+| Read-throughput improvement | 9.02x |
+| Read-latency improvement | 83.4% |
+| Asynchronous review-write latency | 29.474 ms p95 |
+| Review-write latency improvement | 73.4% |
+| Mixed workload throughput | 3,131.4 operations/second |
+| Peak backlog drained to zero | 751 events |
+| Forced 100-event worker recovery | 500.303 ms |
+| Corrupted 5,100-trip city rebuild | 0.284 seconds |
+
+Selected evidence is stored in `reports/`. The complete development narrative and
+limitations are documented in `PHASE1.md` through `PHASE5.md`.
+
+## Repository guide
+
+```text
+src/driver_leaderboard/   API, models, services, and schemas
+alembic/                  Database migrations
+tools/audit/              Independent invariant checks
+tools/iteration/          Deterministic data generation and experiment runner
+tools/benchmark/          PostgreSQL, cache, load, failure, and rebuild benchmarks
+tools/worker/             Transactional-outbox worker CLI
+tests/                    Unit, integration, concurrency, and audit tests
+reports/                  Selected measured evidence
+```
+
+See `architecture.md` for current data flows and failure behavior, and `decisions.md` for
+the engineering decision record.
+
+## Scope
+
+This project focuses on driver-rating correctness and leaderboard derivation. Dispatch,
+trip matching, payments, free-text review serving, fraud-model design, and production
+authentication are intentionally out of scope.
