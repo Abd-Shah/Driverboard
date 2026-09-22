@@ -238,9 +238,8 @@ claims.
 | Forced 100-event worker recovery | 500.303 ms |
 | Corrupted 5,100-trip city rebuild | 0.284 seconds |
 
-Selected benchmark and recovery evidence is stored in `reports/`. The current system
-design is documented in `architecture.md`, while `decisions.md` records why each major
-architectural change was made.
+Selected benchmark and recovery evidence is stored in `reports/`, while the current
+system design and failure behavior are documented in `architecture.md`.
 
 ## Repository guide
 
@@ -255,8 +254,7 @@ tests/                    Unit, integration, concurrency, and audit tests
 reports/                  Selected measured evidence
 ```
 
-See `architecture.md` for current data flows and failure behavior, and `decisions.md` for
-the engineering decision record.
+See `architecture.md` for detailed data flows and failure behavior.
 
 ## Scope
 
